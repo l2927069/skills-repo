@@ -350,7 +350,7 @@ function cmdMeterSphere(jsonPath, outputPath) {
 }
 
 // ====== 命令: upload ======
-async function cmdUpload(jsonPath, configPath, dryRun) {
+async function cmdUpload(jsonPath, configPath, dryRun, forceUpdate) {
   if (!fs.existsSync(jsonPath)) {
     console.error(`测试用例文件不存在: ${jsonPath}`);
     process.exit(1);
@@ -363,6 +363,7 @@ async function cmdUpload(jsonPath, configPath, dryRun) {
   const testcases = JSON.parse(fs.readFileSync(jsonPath, "utf-8"));
   const config = JSON.parse(fs.readFileSync(configPath, "utf-8"));
   dryRun = dryRun || config.dryRun;
+  if (forceUpdate) config.onConflict = "update";
 
   if (!Array.isArray(testcases) || testcases.length === 0) {
     console.error("测试用例为空");
@@ -464,8 +465,9 @@ async function cmdUpload(jsonPath, configPath, dryRun) {
     return config.projectId;
   }
 
-  // ---- 创建单条用例（multipart/form-data） ----
-  async function createTestCase(tc) {
+  // ---- 创建/更新单条用例 ----
+  async function createTestCase(tc, existingId) {
+    const isUpdate = !!existingId;
     const rawSteps = getVal(tc, "steps", "testSteps", "test_steps", "测试步骤");
     const rawExpected = getVal(tc, "expected", "expectedResult", "expected_result", "预期结果");
 
@@ -488,7 +490,7 @@ async function cmdUpload(jsonPath, configPath, dryRun) {
 
     // 构造完整的请求体（与浏览器捕获一致）
     const requestBody = {
-      id: "",
+      id: existingId || "",
       projectId: config.projectId,
       templateId: config.templateId || "",
       name: caseName,
@@ -524,9 +526,15 @@ async function cmdUpload(jsonPath, configPath, dryRun) {
       `------FormBoundary${ts}--\r\n`,
     ].join("");
 
+    const apiEndpoint = isUpdate
+      ? `${baseUrl}/functional/case/add`
+      : `${baseUrl}/functional/case/add`;
+    // 注：update 最终也用 add 端点（带上 id 走 upsert）
+    const endpoint = apiEndpoint;
+
     let res;
     try {
-      res = await fetch(`${baseUrl}/functional/case/add`, {
+      res = await fetch(endpoint, {
         method: "POST",
         headers: {
           ...headers,
@@ -542,7 +550,7 @@ async function cmdUpload(jsonPath, configPath, dryRun) {
       const text = await res.text();
       try {
         const result = JSON.parse(text);
-        return { ok: true, name: caseName, id: result.data?.id || result.id };
+        return { ok: true, name: caseName, id: result.data?.id || result.id, updated: isUpdate };
       } catch (e) {
         return { ok: false, name: caseName, status: res.status, error: "返回非 JSON: " + text.slice(0, 100) };
       }
@@ -552,10 +560,10 @@ async function cmdUpload(jsonPath, configPath, dryRun) {
     }
   }
 
-  // ---- 查询已有用例（用于去重） ----
-  const existingNames = new Set();
+  // ---- 查询已有用例（用于去重/更新） ----
+  const existingMap = new Map(); // name → id
   try {
-    console.log("🔍 查询已有用例，用于去重...");
+    console.log("🔍 查询已有用例...");
     const pageRes = await fetch(`${baseUrl}/functional/case/page`, {
       method: "POST",
       headers: { ...headers, "Content-Type": "application/json" },
@@ -564,58 +572,77 @@ async function cmdUpload(jsonPath, configPath, dryRun) {
     if (pageRes.ok) {
       const pageData = await pageRes.json();
       const list = pageData.data?.list || pageData.data?.records || [];
-      list.forEach((c) => existingNames.add(c.name));
-      console.log(`  📋 已存在 ${existingNames.size} 条用例`);
+      list.forEach((c) => c.name && existingMap.set(c.name, c.id));
+      console.log(`  📋 已存在 ${existingMap.size} 条用例`);
     }
   } catch (err) {
     console.warn("  ⚠️ 查询已有用例失败，跳过去重:", err.message);
   }
 
-  // ---- 去重 ----
-  const toUpload = testcases.filter((tc) => {
+  // ---- 去重/更新 ----
+  const toCreate = [];
+  const toUpdate = [];
+  for (const tc of testcases) {
     const name = getVal(tc, "title", "caseName", "name", "用例名称");
-    if (existingNames.has(name)) {
-      console.log(`  ⏭️ 跳过（已存在）: ${name}`);
-      return false;
+    const existingId = existingMap.get(name);
+    if (existingId) {
+      if (config.onConflict === "update" || config.update) {
+        toUpdate.push({ tc, id: existingId });
+      } else {
+        console.log(`  ⏭️ 跳过（已存在）: ${name}`);
+      }
+    } else {
+      toCreate.push(tc);
     }
-    return true;
-  });
+  }
 
-  if (toUpload.length === 0) {
+  if (toCreate.length === 0 && toUpdate.length === 0) {
     console.log("\n✅ 所有用例已存在，无需上传");
     return;
   }
 
-  if (toUpload.length < testcases.length) {
-    console.log(`\n📊 去重后需上传 ${toUpload.length}/${testcases.length} 条`);
+  if (toUpdate.length > 0) {
+    console.log(`\n📝 将更新 ${toUpdate.length} 条（重名）`);
+  }
+  if (toCreate.length > 0) {
+    console.log(`📝 将创建 ${toCreate.length} 条（新增）`);
   }
 
   // ---- dry-run ----
   if (dryRun) {
-    console.log("\n🏁 --dry-run 模式，以下用例将被创建：\n");
-    for (const tc of toUpload) {
+    console.log("\n🏁 --dry-run 模式，以下操作将被执行：\n");
+    for (const tc of toCreate) {
       const name = getVal(tc, "title", "caseName", "name", "用例名称");
       const module = getVal(tc, "module", "所属模块");
       const priority = getVal(tc, "priority", "优先级");
-      const type = getVal(tc, "type", "testType", "test_type", "用例类型");
-      const steps = getVal(tc, "steps", "testSteps", "测试步骤");
-      const stepCount = steps.split("\n").filter(Boolean).length;
-      console.log(`  📝 ${name}`);
-      console.log(`     模块: ${module} | 优先级: ${priority} | 类型: ${type} | 步骤: ${stepCount}`);
+      console.log(`  ➕ ${name} | ${module} | ${priority}`);
     }
-    console.log(`\n📊 共 ${toUpload.length} 条用例将创建`);
+    for (const { tc } of toUpdate) {
+      const name = getVal(tc, "title", "caseName", "name", "用例名称");
+      console.log(`  🔄 ${name}（已存在，将更新）`);
+    }
+    console.log(`\n📊 共 ${toCreate.length} 条创建 + ${toUpdate.length} 条更新`);
     console.log("💡 移除 --dry-run 参数后执行实际上传");
     return;
   }
 
   // ---- 批量上传 ----
-  console.log(`\n📤 上传 ${toUpload.length} 条用例到 ${baseUrl} ...\n`);
+  const total = toCreate.length + toUpdate.length;
+  console.log(`\n📤 上传 ${total} 条用例到 ${baseUrl} ...\n`);
+  const allWork = [
+    ...toCreate.map((tc) => ({ tc, action: "create" })),
+    ...toUpdate.map(({ tc, id }) => ({ tc, action: "update", existingId: id })),
+  ];
 
-  let success = 0,
-    fail = 0;
-  for (let i = 0; i < toUpload.length; i += batchSize) {
-    const batch = toUpload.slice(i, i + batchSize);
-    const results = await Promise.all(batch.map(createTestCase));
+  let success = 0, fail = 0;
+  for (let i = 0; i < allWork.length; i += batchSize) {
+    const batch = allWork.slice(i, i + batchSize);
+    const results = await Promise.all(
+      batch.map((item) => {
+        if (item.action === "update") return createTestCase(item.tc, item.existingId);
+        return createTestCase(item.tc);
+      })
+    );
 
     for (const r of results) {
       if (r.ok) {
@@ -627,11 +654,13 @@ async function cmdUpload(jsonPath, configPath, dryRun) {
     }
 
     // 批量进度
-    const pct = Math.min(100, Math.round(((i + batch.length) / testcases.length) * 100));
-    console.log(`  📊 进度: ${i + batch.length}/${testcases.length} (${pct}%)  ✅${success} ❌${fail}`);
+    const pct = Math.min(100, Math.round(((i + batch.length) / allWork.length) * 100));
+    console.log(`  📊 进度: ${i + batch.length}/${allWork.length} (${pct}%)  ✅${success} ❌${fail}`);
   }
 
-  console.log(`\n✅ 上传完成: 成功 ${success}, 失败 ${fail}`);
+  const updated = results.filter(r => r?.updated).length;
+  const created = results.filter(r => r?.ok && !r.updated).length;
+  console.log(`\n✅ 上传完成: 创建 ${created}, 更新 ${updated}, 失败 ${fail}`);
 }
 
 // ====== 主入口 ======
@@ -665,13 +694,15 @@ async function main() {
     }
     case "upload": {
       if (!args[0] || !args[1]) {
-        console.error("用法: node req2testcase.mjs upload <testcases.json> <config.json> [--dry-run]");
+        console.error("用法: node req2testcase.mjs upload <testcases.json> <config.json> [--dry-run] [--update]");
         console.error("  config.json 包含: url, projectId, auth(username/password) 或 apiToken");
         console.error("  --dry-run    预览将创建的用例，不实际执行");
+        console.error("  --update     已存在的用例更新而非跳过");
         process.exit(1);
       }
-      const dryRun = args[2] === "--dry-run" || args[2] === "--dryrun";
-      await cmdUpload(args[0], args[1], dryRun);
+      const dryRun = args.includes("--dry-run") || args.includes("--dryrun");
+      const update = args.includes("--update");
+      await cmdUpload(args[0], args[1], dryRun, update);
       break;
     }
     default:
@@ -682,6 +713,7 @@ async function main() {
   node req2testcase.mjs metersphere <input.json> <output.xlsx>    生成 MeterSphere 格式
   node req2testcase.mjs upload <testcases.json> <config.json>     上传到 MeterSphere
   node req2testcase.mjs upload <testcases.json> <config.json> --dry-run  预览上传
+  node req2testcase.mjs upload <testcases.json> <config.json> --update   更新已有用例
 
 示例:
   node req2testcase.mjs extract 需求文档.docx > extracted.json
