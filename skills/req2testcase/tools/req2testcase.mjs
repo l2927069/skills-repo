@@ -381,32 +381,56 @@ async function cmdUpload(jsonPath, configPath) {
   let token;
 
   // ---- 登录 ----
+  let csrfToken = "";
+  let cookieJar = "";
+
   if (config.apiToken) {
     token = config.apiToken;
     console.log("🔑 使用 API Token 认证");
   } else if (config.auth) {
-    console.log(`🔑 登录 ${baseUrl} ...`);
-    const loginRes = await fetch(`${baseUrl}/api/user/login`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        username: config.auth.username,
-        password: config.auth.password,
-      }),
-    });
-    if (!loginRes.ok) {
-      console.error(`❌ 登录失败: ${loginRes.status} ${loginRes.statusText}`);
+    console.log(`🔑 登录 ${baseUrl}/login ...`);
+
+    try {
+      const loginRes = await fetch(`${baseUrl}/login`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          username: config.auth.username,
+          password: config.auth.password,
+        }),
+      });
+
       const text = await loginRes.text();
-      if (text) console.error("  响应:", text);
+
+      if (!loginRes.ok) {
+        console.error(`❌ 登录失败 (${loginRes.status})`);
+        console.error("💡 检查用户名密码是否正确");
+        process.exit(1);
+      }
+
+      const data = JSON.parse(text);
+      if (data.code !== 100200 || !data.data) {
+        console.error(`❌ 登录失败: ${JSON.stringify(data)}`);
+        process.exit(1);
+      }
+
+      // MeterSphere v3.x 使用 session + csrfToken
+      csrfToken = data.data.csrfToken || data.data.token || "";
+      const sessionId = data.data.sessionId || "";
+
+      // 从 Set-Cookie 提取 session cookie
+      const setCookie = loginRes.headers.get("Set-Cookie") || "";
+      cookieJar = setCookie.split(";")[0]; // JSESSIONID=xxx
+
+      if (!csrfToken && !sessionId) {
+        console.error("❌ 登录返回无 csrfToken，可能版本不匹配");
+        process.exit(1);
+      }
+      console.log(`✅ 登录成功 (用户: ${data.data.name}, session: ${sessionId.slice(0,8)}...)`);
+    } catch (err) {
+      console.error(`❌ 登录请求失败: ${err.message}`);
       process.exit(1);
     }
-    const loginData = await loginRes.json();
-    token = loginData.data?.token || loginData.token;
-    if (!token) {
-      console.error("❌ 登录返回无 token，请检查用户名密码");
-      process.exit(1);
-    }
-    console.log("✅ 登录成功");
   } else {
     console.error("配置缺少 auth 或 apiToken");
     process.exit(1);
@@ -414,9 +438,15 @@ async function cmdUpload(jsonPath, configPath) {
 
   const headers = {
     "Content-Type": "application/json",
-    Authorization: `Bearer ${token}`,
     Accept: "application/json",
+    Cookie: cookieJar || token,
   };
+  if (csrfToken) headers["CSRF-Token"] = csrfToken;
+  if (cookieJar && !token) {
+    // 使用 cookie 认证
+  } else if (token && !cookieJar) {
+    headers["X-AUTH-TOKEN"] = token;
+  }
 
   // 字段映射辅助函数
   function getVal(tc, ...keys) {
@@ -502,18 +532,28 @@ async function cmdUpload(jsonPath, configPath) {
 
     if (config.debug) console.log("  请求体:", JSON.stringify(body, null, 2));
 
-    const res = await fetch(`${baseUrl}/functional/case/add`, {
-      method: "POST",
-      headers,
-      body: JSON.stringify(body),
-    });
+    let res;
+    try {
+      res = await fetch(`${baseUrl}/functional/case/add`, {
+        method: "POST",
+        headers,
+        body: JSON.stringify(body),
+      });
+    } catch (err) {
+      return { ok: false, name: caseName, status: 0, error: err.message };
+    }
 
     if (res.ok) {
-      const result = await res.json();
-      return { ok: true, name: caseName, id: result.data?.id || result.id };
+      const text = await res.text();
+      try {
+        const result = JSON.parse(text);
+        return { ok: true, name: caseName, id: result.data?.id || result.id };
+      } catch (e) {
+        return { ok: false, name: caseName, status: res.status, error: "返回非 JSON: " + text.slice(0, 100) };
+      }
     } else {
       const text = await res.text();
-      return { ok: false, name: caseName, status: res.status, error: text };
+      return { ok: false, name: caseName, status: res.status, error: text.slice(0, 300) };
     }
   }
 

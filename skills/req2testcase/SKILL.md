@@ -137,34 +137,30 @@ node tools/req2testcase.mjs metersphere testcases.json "<文件名>_MeterSphere.
 
 ### 🔄 Step 5: 自动上传到 MeterSphere（可选）
 
-无需手动导入，直接通过 API 上传：
+通过 API 直接上传测试用例。
 
 **1. 准备配置文件** `ms-config.json`：
 ```json
 {
-  "url": "http://192.168.1.100:8081",
+  "url": "http://你的MeterSphere地址:8081",
   "projectId": "你的项目ID",
   "auth": {
     "username": "admin",
-    "password": "你的密码"
+    "password": "密码"
   },
   "batchSize": 10,
   "debug": false
 }
 ```
 
+> 如何获取 projectId：登录 MeterSphere → 打开功能用例页面 → 地址栏 `?projectId=xxx`
+
 **2. 执行上传：**
 ```bash
 node tools/req2testcase.mjs upload testcases.json ms-config.json
 ```
 
-上传过程自动：
-- ✅ 登录获取 Token
-- ✅ 按模块路径自动创建/匹配模块
-- ✅ 批量并发上传（每批 10 条）
-- ✅ 显示进度和结果
-
-> ⚠️ 首次使用需确认 API 地址和端口。如果接口返回格式有差异，根据实际错误调整 request body 字段名即可。
+> ⚠️ **首次对接**：打开浏览器 F12 → Network，手动创建一条用例，把捕获到的 API 地址和请求体发给我，我帮你适配。
 
 ## 优先级定义
 
