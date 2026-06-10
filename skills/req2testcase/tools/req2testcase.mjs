@@ -414,7 +414,9 @@ async function cmdUpload(jsonPath, configPath) {
         process.exit(1);
       }
 
-      // MeterSphere v3.x 使用 session + csrfToken
+      // X-AUTH-TOKEN 在响应头中
+      token = loginRes.headers.get("X-AUTH-TOKEN") || "";
+      // csrfToken 在响应体中
       csrfToken = data.data.csrfToken || data.data.token || "";
       const sessionId = data.data.sessionId || "";
 
@@ -436,17 +438,15 @@ async function cmdUpload(jsonPath, configPath) {
     process.exit(1);
   }
 
+  // 通用请求头（所有 API 调用都需要）
   const headers = {
-    "Content-Type": "application/json",
-    Accept: "application/json",
-    Cookie: cookieJar || token,
+    Accept: "application/json, text/plain, */*",
+    "X-AUTH-TOKEN": token,
+    "csrf-token": csrfToken,
   };
-  if (csrfToken) headers["CSRF-Token"] = csrfToken;
-  if (cookieJar && !token) {
-    // 使用 cookie 认证
-  } else if (token && !cookieJar) {
-    headers["X-AUTH-TOKEN"] = token;
-  }
+  if (config.organization) headers["organization"] = config.organization;
+  if (config.projectId) headers["project"] = config.projectId;
+  if (cookieJar) headers["Cookie"] = cookieJar;
 
   // 字段映射辅助函数
   function getVal(tc, ...keys) {
@@ -457,49 +457,13 @@ async function cmdUpload(jsonPath, configPath) {
     return "";
   }
 
-  // ---- 模块查找/创建 ----
+  // ---- 模块查找 ----
   async function ensureModule(modulePath) {
-    if (!modulePath) return config.projectId; // 默认根模块
-    const parts = modulePath.split("/").filter(Boolean);
-
-    // 逐级查找或创建
-    let parentId = config.projectId;
-    for (const name of parts) {
-      const searchRes = await fetch(
-        `${baseUrl}/functional/module/list/${config.projectId}?name=${encodeURIComponent(name)}`,
-        { headers }
-      );
-      if (searchRes.ok) {
-        const modules = await searchRes.json();
-        const found = modules?.data?.find((m) => m.name === name);
-        if (found) {
-          parentId = found.id;
-          continue;
-        }
-      }
-      // 模块不存在，创建
-      const createRes = await fetch(`${baseUrl}/functional/module/add`, {
-        method: "POST",
-        headers,
-        body: JSON.stringify({
-          projectId: config.projectId,
-          name: name,
-          parentId: parentId === config.projectId ? null : parentId,
-        }),
-      });
-      if (createRes.ok) {
-        const created = await createRes.json();
-        parentId = created.data?.id || created.id;
-        console.log(`  📁 创建模块: ${name}`);
-      } else {
-        console.warn(`  ⚠️ 模块 "${name}" 创建失败，使用父模块`);
-        break;
-      }
-    }
-    return parentId;
+    // MeterSphere v3.x 模块 API 已变更，暂时直接用根模块
+    return config.projectId;
   }
 
-  // ---- 创建单条用例 ----
+  // ---- 创建单条用例（multipart/form-data） ----
   async function createTestCase(tc) {
     const rawSteps = getVal(tc, "steps", "testSteps", "test_steps", "测试步骤");
     const rawExpected = getVal(tc, "expected", "expectedResult", "expected_result", "预期结果");
@@ -507,9 +471,10 @@ async function cmdUpload(jsonPath, configPath) {
     const stepLines = rawSteps.split("\n").filter(Boolean);
     const expectedLines = rawExpected.split("\n").filter(Boolean);
 
-    // 构造 MeterSphere 步骤格式
+    // 构造 MeterSphere 步骤格式（带 id）
     const steps = stepLines.map((s, i) => ({
-      num: i + 1,
+      id: `step_${Date.now()}_${i}`,
+      num: i,
       desc: s.replace(/^\d+[.、．]\s*/, ""),
       result: expectedLines[i]
         ? expectedLines[i].replace(/^\d+[.、．]\s*/, "")
@@ -518,26 +483,55 @@ async function cmdUpload(jsonPath, configPath) {
 
     const moduleId = await ensureModule(getVal(tc, "module", "所属模块"));
     const caseName = getVal(tc, "title", "caseName", "name", "用例名称");
+    const priority = getVal(tc, "priority", "优先级").replace(/^P/i, "P") || "P3";
 
-    const body = {
+    // 构造完整的请求体（与浏览器捕获一致）
+    const requestBody = {
+      id: "",
       projectId: config.projectId,
-      moduleId: moduleId,
+      templateId: config.templateId || "",
       name: caseName,
-      priority: getVal(tc, "priority", "优先级").replace(/^P/i, "P") || "P3",
-      type: getVal(tc, "type", "testType", "test_type", "用例类型") || "functional",
       prerequisite: getVal(tc, "precondition", "preCondition", "pre_condition", "前置条件"),
+      caseEditType: "STEP",
       steps: JSON.stringify(steps),
+      textDescription: "",
+      expectedResult: "",
+      description: "",
+      publicCase: false,
+      moduleId: moduleId,
+      versionId: "",
       tags: [getVal(tc, "type", "testType", "test_type", "用例类型") || "功能测试"],
+      customFields: [
+        { fieldId: config.priorityFieldId || "", value: priority },
+      ],
+      relateFileMetaIds: [],
+      functionalPriority: "",
+      reviewStatus: "UN_REVIEWED",
+      caseDetailFileIds: [],
+      aiCreate: false,
     };
 
-    if (config.debug) console.log("  请求体:", JSON.stringify(body, null, 2));
+    if (config.debug) {
+      console.log("  请求体:", JSON.stringify(requestBody, null, 2));
+    }
+
+    // 构造 multipart/form-data（与浏览器一致）
+    const ts = Date.now();
+    const boundary = `----FormBoundary${ts}`;
+    const multipartBody = [
+      `------FormBoundary${ts}\r\nContent-Disposition: form-data; name="request"; filename="blob"\r\nContent-Type: application/json;charset=utf-8\r\n\r\n${JSON.stringify(requestBody)}\r\n`,
+      `------FormBoundary${ts}--\r\n`,
+    ].join("");
 
     let res;
     try {
       res = await fetch(`${baseUrl}/functional/case/add`, {
         method: "POST",
-        headers,
-        body: JSON.stringify(body),
+        headers: {
+          ...headers,
+          "Content-Type": `multipart/form-data; boundary=----FormBoundary${ts}`,
+        },
+        body: multipartBody,
       });
     } catch (err) {
       return { ok: false, name: caseName, status: 0, error: err.message };

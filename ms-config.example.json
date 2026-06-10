@@ -1,0 +1,15 @@
+{
+  "url": "https://demo.metersphere.com",
+  "projectId": "100001100001",
+  "organization": "100001",
+  "templateId": "100905486823456999",
+  "priorityFieldId": "100905486823456997",
+
+  "auth": {
+    "username": "demo",
+    "password": "demo"
+  },
+
+  "batchSize": 5,
+  "debug": true
+}
