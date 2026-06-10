@@ -1,0 +1,16 @@
+# Claude Code
+.claude/
+
+# Dependencies
+node_modules/
+
+# Skill packages
+*.skill
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
