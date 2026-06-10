@@ -82,13 +82,58 @@ node tools/req2testcase.mjs extract "<文档路径.docx>"
 - **业务规则测试** — 条件组合、状态流转
 - **安全测试** — 鉴权绕过、SQL注入、XSS（如适用）
 
-### Step 3: 生成 Excel 文件
+### ⏸ Step 3: 导出草稿 → 用户评审
 
-将 AI 生成的测试用例数据保存为 JSON 文件，然后：
+将 AI 生成的测试用例导出为 **草稿 Excel**，供用户打开查看和修改：
 
+**通用 Excel 草稿：**
 ```bash
-node tools/req2testcase.mjs generate testcases.json "测试用例.xlsx"
+node tools/req2testcase.mjs generate testcases.json "<文件名>_待评审.xlsx"
 ```
+
+**MeterSphere 格式草稿：**
+```bash
+node tools/req2testcase.mjs metersphere testcases.json "<文件名>_待评审.xlsx"
+```
+
+向用户呈现概要：
+
+```
+📋 测试用例生成完毕，共 X 条
+   草稿已导出到桌面：xxx_待评审.xlsx
+
+=== 按模块统计 ===
+  xxx: X 条
+  yyy: Y 条
+
+=== 按优先级统计 ===
+  P0: X 条 | P1: Y 条 | P2: Z 条
+
+=== 按类型统计 ===
+  功能测试: X 条 | 边界测试: Y 条 | 异常测试: Z 条
+```
+
+**等待用户操作：**
+- 用户打开 Excel 审阅
+- 用户回复：
+  - "确认" → 进入 Step 4 导出最终版
+  - "修改..." → 根据反馈调整用例，重新导出草稿
+  - "补充..." → 补充遗漏场景
+
+### Step 4: 导出最终文件
+
+用户确认后，导出不带"待评审"标记的最终文件：
+
+**通用 Excel：**
+```bash
+node tools/req2testcase.mjs generate testcases.json "<文件名>.xlsx"
+```
+
+**MeterSphere 格式：**
+```bash
+node tools/req2testcase.mjs metersphere testcases.json "<文件名>_MeterSphere.xlsx"
+```
+导入路径：测试跟踪 → 功能用例 → 导入 → Excel → 步骤描述
 
 ## 优先级定义
 
