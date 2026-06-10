@@ -350,7 +350,7 @@ function cmdMeterSphere(jsonPath, outputPath) {
 }
 
 // ====== 命令: upload ======
-async function cmdUpload(jsonPath, configPath) {
+async function cmdUpload(jsonPath, configPath, dryRun) {
   if (!fs.existsSync(jsonPath)) {
     console.error(`测试用例文件不存在: ${jsonPath}`);
     process.exit(1);
@@ -362,6 +362,7 @@ async function cmdUpload(jsonPath, configPath) {
 
   const testcases = JSON.parse(fs.readFileSync(jsonPath, "utf-8"));
   const config = JSON.parse(fs.readFileSync(configPath, "utf-8"));
+  dryRun = dryRun || config.dryRun;
 
   if (!Array.isArray(testcases) || testcases.length === 0) {
     console.error("测试用例为空");
@@ -551,13 +552,69 @@ async function cmdUpload(jsonPath, configPath) {
     }
   }
 
+  // ---- 查询已有用例（用于去重） ----
+  const existingNames = new Set();
+  try {
+    console.log("🔍 查询已有用例，用于去重...");
+    const pageRes = await fetch(`${baseUrl}/functional/case/page`, {
+      method: "POST",
+      headers: { ...headers, "Content-Type": "application/json" },
+      body: JSON.stringify({ projectId: config.projectId, pageSize: 500, current: 1 }),
+    });
+    if (pageRes.ok) {
+      const pageData = await pageRes.json();
+      const list = pageData.data?.list || pageData.data?.records || [];
+      list.forEach((c) => existingNames.add(c.name));
+      console.log(`  📋 已存在 ${existingNames.size} 条用例`);
+    }
+  } catch (err) {
+    console.warn("  ⚠️ 查询已有用例失败，跳过去重:", err.message);
+  }
+
+  // ---- 去重 ----
+  const toUpload = testcases.filter((tc) => {
+    const name = getVal(tc, "title", "caseName", "name", "用例名称");
+    if (existingNames.has(name)) {
+      console.log(`  ⏭️ 跳过（已存在）: ${name}`);
+      return false;
+    }
+    return true;
+  });
+
+  if (toUpload.length === 0) {
+    console.log("\n✅ 所有用例已存在，无需上传");
+    return;
+  }
+
+  if (toUpload.length < testcases.length) {
+    console.log(`\n📊 去重后需上传 ${toUpload.length}/${testcases.length} 条`);
+  }
+
+  // ---- dry-run ----
+  if (dryRun) {
+    console.log("\n🏁 --dry-run 模式，以下用例将被创建：\n");
+    for (const tc of toUpload) {
+      const name = getVal(tc, "title", "caseName", "name", "用例名称");
+      const module = getVal(tc, "module", "所属模块");
+      const priority = getVal(tc, "priority", "优先级");
+      const type = getVal(tc, "type", "testType", "test_type", "用例类型");
+      const steps = getVal(tc, "steps", "testSteps", "测试步骤");
+      const stepCount = steps.split("\n").filter(Boolean).length;
+      console.log(`  📝 ${name}`);
+      console.log(`     模块: ${module} | 优先级: ${priority} | 类型: ${type} | 步骤: ${stepCount}`);
+    }
+    console.log(`\n📊 共 ${toUpload.length} 条用例将创建`);
+    console.log("💡 移除 --dry-run 参数后执行实际上传");
+    return;
+  }
+
   // ---- 批量上传 ----
-  console.log(`\n📤 开始上传 ${testcases.length} 条用例到 ${baseUrl} ...\n`);
+  console.log(`\n📤 上传 ${toUpload.length} 条用例到 ${baseUrl} ...\n`);
 
   let success = 0,
     fail = 0;
-  for (let i = 0; i < testcases.length; i += batchSize) {
-    const batch = testcases.slice(i, i + batchSize);
+  for (let i = 0; i < toUpload.length; i += batchSize) {
+    const batch = toUpload.slice(i, i + batchSize);
     const results = await Promise.all(batch.map(createTestCase));
 
     for (const r of results) {
@@ -608,11 +665,13 @@ async function main() {
     }
     case "upload": {
       if (!args[0] || !args[1]) {
-        console.error("用法: node req2testcase.mjs upload <testcases.json> <config.json>");
+        console.error("用法: node req2testcase.mjs upload <testcases.json> <config.json> [--dry-run]");
         console.error("  config.json 包含: url, projectId, auth(username/password) 或 apiToken");
+        console.error("  --dry-run    预览将创建的用例，不实际执行");
         process.exit(1);
       }
-      await cmdUpload(args[0], args[1]);
+      const dryRun = args[2] === "--dry-run" || args[2] === "--dryrun";
+      await cmdUpload(args[0], args[1], dryRun);
       break;
     }
     default:
@@ -622,6 +681,7 @@ async function main() {
   node req2testcase.mjs generate <input.json> <output.xlsx>       生成通用 Excel
   node req2testcase.mjs metersphere <input.json> <output.xlsx>    生成 MeterSphere 格式
   node req2testcase.mjs upload <testcases.json> <config.json>     上传到 MeterSphere
+  node req2testcase.mjs upload <testcases.json> <config.json> --dry-run  预览上传
 
 示例:
   node req2testcase.mjs extract 需求文档.docx > extracted.json
