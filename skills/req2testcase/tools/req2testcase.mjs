@@ -212,6 +212,337 @@ function cmdGenerate(jsonPath, outputPath) {
   console.log(`📊 共 ${testcases.length} 条用例`);
 }
 
+// ====== 命令: metersphere ======
+function cmdMeterSphere(jsonPath, outputPath) {
+  if (!fs.existsSync(jsonPath)) {
+    console.error(`文件不存在: ${jsonPath}`);
+    process.exit(1);
+  }
+
+  const jsonRaw = fs.readFileSync(jsonPath, "utf-8");
+  const testcases = JSON.parse(jsonRaw);
+  if (!Array.isArray(testcases)) {
+    console.error("JSON 必须是测试用例数组");
+    process.exit(1);
+  }
+
+  // 字段映射（支持中英文 key）
+  function getVal(tc, ...keys) {
+    for (const k of keys) {
+      const v = tc[k];
+      if (v !== undefined && v !== null && v !== "") return String(v);
+    }
+    return "";
+  }
+
+  // MeterSphere 导入模板列头（步骤描述模式）
+  const MS_HEADERS = [
+    "用例名称",
+    "用例等级",
+    "用例类型",
+    "模块",
+    "前置条件",
+    "步骤描述",
+    "预期结果",
+    "标签",
+    "备注",
+  ];
+
+  const wsData = [MS_HEADERS];
+
+  for (const tc of testcases) {
+    // 步骤和预期结果处理：确保带序号
+    const rawSteps = getVal(tc, "steps", "testSteps", "test_steps", "测试步骤");
+    const rawExpected = getVal(tc, "expected", "expectedResult", "expected_result", "预期结果");
+
+    // 将步骤和预期按行分割，加上序号
+    const stepLines = rawSteps.split("\n").filter(Boolean);
+    const expectedLines = rawExpected.split("\n").filter(Boolean);
+
+    const numberedSteps = stepLines
+      .map((s, i) => {
+        // 如果已经有 "N. " 或 "N、 " 开头就不加序号
+        if (/^\d+[.、．]/.test(s.trim())) return s.trim();
+        return `${i + 1}. ${s.trim()}`;
+      })
+      .join("\n");
+
+    const numberedExpected = expectedLines
+      .map((e, i) => {
+        if (/^\d+[.、．]/.test(e.trim())) return e.trim();
+        return `${i + 1}. ${e.trim()}`;
+      })
+      .join("\n");
+
+    // 模块路径处理：所属模块可能包含 "/" 用于 MeterSphere 多级模块
+    const modulePath = getVal(tc, "module", "所属模块");
+
+    // 标签：从用例类型 + 优先级生成
+    const testType = getVal(tc, "type", "testType", "test_type", "用例类型");
+    const priority = getVal(tc, "priority", "优先级");
+    const tags = [testType, `P${priority.replace(/[Pp]/g, "")}`]
+      .filter(Boolean)
+      .join("、");
+
+    // 备注：放用例编号
+    const caseId = getVal(tc, "id", "caseId", "case_id", "用例编号");
+
+    const row = [
+      getVal(tc, "title", "caseName", "name", "用例名称"), // 用例名称
+      priority.replace(/^P/i, "P"),                          // 用例等级
+      testType,                                              // 用例类型
+      modulePath,                                            // 模块
+      getVal(tc, "precondition", "preCondition", "pre_condition", "前置条件"), // 前置条件
+      numberedSteps,                                         // 步骤描述
+      numberedExpected,                                      // 预期结果
+      tags,                                                  // 标签
+      caseId ? `原用例编号: ${caseId}` : "",                  // 备注
+    ];
+    wsData.push(row);
+  }
+
+  const wb = XLSX.utils.book_new();
+  const ws = XLSX.utils.aoa_to_sheet(wsData);
+
+  const MS_COL_WIDTHS = [30, 10, 14, 20, 30, 40, 40, 20, 20];
+  ws["!cols"] = MS_COL_WIDTHS.map((w) => ({ wch: w }));
+  ws["!freeze"] = { x: 0, y: 1 };
+
+  const headerStyle = {
+    font: { name: "微软雅黑", bold: true, sz: 11, color: { rgb: "FFFFFF" } },
+    fill: { fgColor: { rgb: "4472C4" }, patternType: "solid" },
+    alignment: { horizontal: "center", vertical: "center", wrapText: true },
+    border: buildXBorders(),
+  };
+  const cellStyle = {
+    font: { name: "微软雅黑", sz: 10 },
+    alignment: { vertical: "top", wrapText: true },
+    border: buildXBorders(),
+  };
+
+  for (let c = 0; c < MS_HEADERS.length; c++) {
+    const addr = XLSX.utils.encode_cell({ r: 0, c });
+    if (ws[addr]) ws[addr].s = headerStyle;
+  }
+
+  for (let r = 1; r < wsData.length; r++) {
+    for (let c = 0; c < MS_HEADERS.length; c++) {
+      const addr = XLSX.utils.encode_cell({ r, c });
+      if (!ws[addr]) continue;
+      ws[addr].s = cellStyle;
+      // 优先级列特殊着色（第2列）
+      if (c === 1) {
+        const p = String(ws[addr].v).trim().toUpperCase();
+        if (p === "P0") {
+          ws[addr].s.font = { bold: true, color: { rgb: "FF0000" }, sz: 10, name: "微软雅黑" };
+        } else if (p === "P1") {
+          ws[addr].s.font = { color: { rgb: "FF8C00" }, sz: 10, name: "微软雅黑" };
+        }
+      }
+    }
+  }
+
+  XLSX.utils.book_append_sheet(wb, ws, "测试用例");
+  XLSX.writeFile(wb, outputPath);
+  console.log(`✅ MeterSphere 格式已生成: ${outputPath}`);
+  console.log(`📊 共 ${testcases.length} 条用例`);
+  console.log("💡 导入路径: 测试跟踪 → 功能用例 → 导入 → Excel → 步骤描述");
+}
+
+// ====== 命令: upload ======
+async function cmdUpload(jsonPath, configPath) {
+  if (!fs.existsSync(jsonPath)) {
+    console.error(`测试用例文件不存在: ${jsonPath}`);
+    process.exit(1);
+  }
+  if (!fs.existsSync(configPath)) {
+    console.error(`配置文件不存在: ${configPath}`);
+    process.exit(1);
+  }
+
+  const testcases = JSON.parse(fs.readFileSync(jsonPath, "utf-8"));
+  const config = JSON.parse(fs.readFileSync(configPath, "utf-8"));
+
+  if (!Array.isArray(testcases) || testcases.length === 0) {
+    console.error("测试用例为空");
+    process.exit(1);
+  }
+  if (!config.url) {
+    console.error("配置缺少 url (MeterSphere 地址)");
+    process.exit(1);
+  }
+  if (!config.projectId) {
+    console.error("配置缺少 projectId");
+    process.exit(1);
+  }
+
+  const baseUrl = config.url.replace(/\/+$/, "");
+  const batchSize = config.batchSize || 10;
+  let token;
+
+  // ---- 登录 ----
+  if (config.apiToken) {
+    token = config.apiToken;
+    console.log("🔑 使用 API Token 认证");
+  } else if (config.auth) {
+    console.log(`🔑 登录 ${baseUrl} ...`);
+    const loginRes = await fetch(`${baseUrl}/api/user/login`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        username: config.auth.username,
+        password: config.auth.password,
+      }),
+    });
+    if (!loginRes.ok) {
+      console.error(`❌ 登录失败: ${loginRes.status} ${loginRes.statusText}`);
+      const text = await loginRes.text();
+      if (text) console.error("  响应:", text);
+      process.exit(1);
+    }
+    const loginData = await loginRes.json();
+    token = loginData.data?.token || loginData.token;
+    if (!token) {
+      console.error("❌ 登录返回无 token，请检查用户名密码");
+      process.exit(1);
+    }
+    console.log("✅ 登录成功");
+  } else {
+    console.error("配置缺少 auth 或 apiToken");
+    process.exit(1);
+  }
+
+  const headers = {
+    "Content-Type": "application/json",
+    Authorization: `Bearer ${token}`,
+    Accept: "application/json",
+  };
+
+  // 字段映射辅助函数
+  function getVal(tc, ...keys) {
+    for (const k of keys) {
+      const v = tc[k];
+      if (v !== undefined && v !== null && v !== "") return String(v);
+    }
+    return "";
+  }
+
+  // ---- 模块查找/创建 ----
+  async function ensureModule(modulePath) {
+    if (!modulePath) return config.projectId; // 默认根模块
+    const parts = modulePath.split("/").filter(Boolean);
+
+    // 逐级查找或创建
+    let parentId = config.projectId;
+    for (const name of parts) {
+      const searchRes = await fetch(
+        `${baseUrl}/functional/module/list/${config.projectId}?name=${encodeURIComponent(name)}`,
+        { headers }
+      );
+      if (searchRes.ok) {
+        const modules = await searchRes.json();
+        const found = modules?.data?.find((m) => m.name === name);
+        if (found) {
+          parentId = found.id;
+          continue;
+        }
+      }
+      // 模块不存在，创建
+      const createRes = await fetch(`${baseUrl}/functional/module/add`, {
+        method: "POST",
+        headers,
+        body: JSON.stringify({
+          projectId: config.projectId,
+          name: name,
+          parentId: parentId === config.projectId ? null : parentId,
+        }),
+      });
+      if (createRes.ok) {
+        const created = await createRes.json();
+        parentId = created.data?.id || created.id;
+        console.log(`  📁 创建模块: ${name}`);
+      } else {
+        console.warn(`  ⚠️ 模块 "${name}" 创建失败，使用父模块`);
+        break;
+      }
+    }
+    return parentId;
+  }
+
+  // ---- 创建单条用例 ----
+  async function createTestCase(tc) {
+    const rawSteps = getVal(tc, "steps", "testSteps", "test_steps", "测试步骤");
+    const rawExpected = getVal(tc, "expected", "expectedResult", "expected_result", "预期结果");
+
+    const stepLines = rawSteps.split("\n").filter(Boolean);
+    const expectedLines = rawExpected.split("\n").filter(Boolean);
+
+    // 构造 MeterSphere 步骤格式
+    const steps = stepLines.map((s, i) => ({
+      num: i + 1,
+      desc: s.replace(/^\d+[.、．]\s*/, ""),
+      result: expectedLines[i]
+        ? expectedLines[i].replace(/^\d+[.、．]\s*/, "")
+        : "",
+    }));
+
+    const moduleId = await ensureModule(getVal(tc, "module", "所属模块"));
+    const caseName = getVal(tc, "title", "caseName", "name", "用例名称");
+
+    const body = {
+      projectId: config.projectId,
+      moduleId: moduleId,
+      name: caseName,
+      priority: getVal(tc, "priority", "优先级").replace(/^P/i, "P") || "P3",
+      type: getVal(tc, "type", "testType", "test_type", "用例类型") || "functional",
+      prerequisite: getVal(tc, "precondition", "preCondition", "pre_condition", "前置条件"),
+      steps: JSON.stringify(steps),
+      tags: [getVal(tc, "type", "testType", "test_type", "用例类型") || "功能测试"],
+    };
+
+    if (config.debug) console.log("  请求体:", JSON.stringify(body, null, 2));
+
+    const res = await fetch(`${baseUrl}/functional/case/add`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify(body),
+    });
+
+    if (res.ok) {
+      const result = await res.json();
+      return { ok: true, name: caseName, id: result.data?.id || result.id };
+    } else {
+      const text = await res.text();
+      return { ok: false, name: caseName, status: res.status, error: text };
+    }
+  }
+
+  // ---- 批量上传 ----
+  console.log(`\n📤 开始上传 ${testcases.length} 条用例到 ${baseUrl} ...\n`);
+
+  let success = 0,
+    fail = 0;
+  for (let i = 0; i < testcases.length; i += batchSize) {
+    const batch = testcases.slice(i, i + batchSize);
+    const results = await Promise.all(batch.map(createTestCase));
+
+    for (const r of results) {
+      if (r.ok) {
+        success++;
+      } else {
+        fail++;
+        console.error(`  ❌ [${r.name}] ${r.status}: ${(r.error || "").slice(0, 200)}`);
+      }
+    }
+
+    // 批量进度
+    const pct = Math.min(100, Math.round(((i + batch.length) / testcases.length) * 100));
+    console.log(`  📊 进度: ${i + batch.length}/${testcases.length} (${pct}%)  ✅${success} ❌${fail}`);
+  }
+
+  console.log(`\n✅ 上传完成: 成功 ${success}, 失败 ${fail}`);
+}
+
 // ====== 主入口 ======
 async function main() {
   const [, , command, ...args] = process.argv;
@@ -233,15 +564,35 @@ async function main() {
       cmdGenerate(args[0], args[1]);
       break;
     }
+    case "metersphere": {
+      if (!args[0] || !args[1]) {
+        console.error("用法: node req2testcase.mjs metersphere <input.json> <output.xlsx>");
+        process.exit(1);
+      }
+      cmdMeterSphere(args[0], args[1]);
+      break;
+    }
+    case "upload": {
+      if (!args[0] || !args[1]) {
+        console.error("用法: node req2testcase.mjs upload <testcases.json> <config.json>");
+        console.error("  config.json 包含: url, projectId, auth(username/password) 或 apiToken");
+        process.exit(1);
+      }
+      await cmdUpload(args[0], args[1]);
+      break;
+    }
     default:
       console.error(`
 用法:
-  node req2testcase.mjs extract <input.docx>       提取 Word 文本
-  node req2testcase.mjs generate <input.json> <output.xlsx>  生成 Excel
+  node req2testcase.mjs extract <input.docx>                      提取 Word 文本
+  node req2testcase.mjs generate <input.json> <output.xlsx>       生成通用 Excel
+  node req2testcase.mjs metersphere <input.json> <output.xlsx>    生成 MeterSphere 格式
+  node req2testcase.mjs upload <testcases.json> <config.json>     上传到 MeterSphere
 
 示例:
   node req2testcase.mjs extract 需求文档.docx > extracted.json
-  node req2testcase.mjs generate testcases.json 测试用例.xlsx
+  node req2testcase.mjs metersphere testcases.json 测试用例.xlsx
+  node req2testcase.mjs upload testcases.json ms-config.json
 `);
       process.exit(1);
   }

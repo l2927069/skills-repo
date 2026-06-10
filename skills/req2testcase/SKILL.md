@@ -135,6 +135,37 @@ node tools/req2testcase.mjs metersphere testcases.json "<文件名>_MeterSphere.
 ```
 导入路径：测试跟踪 → 功能用例 → 导入 → Excel → 步骤描述
 
+### 🔄 Step 5: 自动上传到 MeterSphere（可选）
+
+无需手动导入，直接通过 API 上传：
+
+**1. 准备配置文件** `ms-config.json`：
+```json
+{
+  "url": "http://192.168.1.100:8081",
+  "projectId": "你的项目ID",
+  "auth": {
+    "username": "admin",
+    "password": "你的密码"
+  },
+  "batchSize": 10,
+  "debug": false
+}
+```
+
+**2. 执行上传：**
+```bash
+node tools/req2testcase.mjs upload testcases.json ms-config.json
+```
+
+上传过程自动：
+- ✅ 登录获取 Token
+- ✅ 按模块路径自动创建/匹配模块
+- ✅ 批量并发上传（每批 10 条）
+- ✅ 显示进度和结果
+
+> ⚠️ 首次使用需确认 API 地址和端口。如果接口返回格式有差异，根据实际错误调整 request body 字段名即可。
+
 ## 优先级定义
 
 | 级别 | 定义 |
